@@ -1,0 +1,1 @@
+This this is my personal AI alter-ego created to answer any professional question related to my skill set and job expertice to potential recruiters and partners.
