@@ -1,17 +1,33 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
-from fastapi.responses import HTMLResponse   
+
+# ---- Rate limiting imports (MUST be early) ----
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
 client = OpenAI()
 app = FastAPI()
 
-# Load documents once at startup
+# ---- Initialize limiter FIRST ----
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Too many requests. Please slow down."}
+    )
+
+# ---- Load documents once at startup ----
 def load_pdf(path):
     reader = PdfReader(path)
     return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -22,26 +38,20 @@ resume = load_pdf("me/Resume_Devesh.pdf")
 with open("me/summary_Devesh.txt", "r", encoding="utf-8") as f:
     summary = f.read()
 
-
 name = "Devesh Sonpure"
-system_prompt = f"You are acting as {name}. You are answering questions on {name}'s website, \
-particularly questions related to {name}'s career, background, skills and experience. \
-Your responsibility is to represent {name} for interactions on the website as faithfully as possible. \
-You are given a summary of {name}'s background and LinkedIn profile and {name}'s resume which you can use to answer questions. \
-Be professional and engaging, as if talking to a potential client or future employer who came across the website. \
-If you don't know the answer, say so. Make sure all your answers are strictly within the scope of professional details only. \
-All the answers related to experience should be strictly from the job experience mentioned in these resources only. \
-if you do not get the required information within the provided resources, politely inform that you are not sure about it."
+
+system_prompt = f"""
+You are acting as {name}. You are answering questions on {name}'s website,
+particularly questions related to {name}'s career, background, skills and experience.
+Be professional and engaging.
+If you don't know the answer, say so politely.
+"""
 
 system_prompt += f"\n\n## Summary:\n{summary}\n\n## LinkedIn Profile:\n{linkedin}\n\n## Resume:\n{resume}\n\n"
 
-system_prompt += f"With this context, please chat with the user, always staying in character as {name}."
-
-
-
+# ---- Request schema ----
 class ChatRequest(BaseModel):
     message: str
-
 
 # ---- Serve frontend ----
 @app.get("/", response_class=HTMLResponse)
@@ -49,10 +59,14 @@ def home():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+# ---- Chat endpoint (NOW SAFE) ----
 @app.post("/chat")
-def chat(req: ChatRequest):
+@limiter.limit("10/minute")   # ✅ limiter exists now
+def chat(request: Request, req: ChatRequest):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
+        max_tokens=300,     # 🔒 token cap
+        temperature=0.6,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": req.message}
